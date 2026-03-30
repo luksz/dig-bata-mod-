@@ -1,0 +1,8 @@
+Matric number: U2221027H
+Derived start window: 2017-02
+Matched towns: BEDOK, BUKIT PANJANG, CLEMENTI, TAMPINES
+Output row count: 568
+Header check: PASS
+Sorted by (x, y): PASS
+All price-per-sqm values <= 4725: PASS
+No blank fields in emitted rows: PASS

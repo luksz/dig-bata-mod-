@@ -1,0 +1,5 @@
+Pair,Candidate_Count,Independent_Min_Raw,Independent_Min_Rounded,Program_Min_Rounded,Matched,Year,Month,Town,Block,Floor_Area,Flat_Model,Lease_Commence_Date
+"(1, 80)",145,2912.621359,2913,2913,YES,2017,02,BUKIT PANJANG,149,103,Model A,1988
+"(1, 147)",3,4295.302013,4295,4295,YES,2017,02,TAMPINES,874A,149,Maisonette,1989
+"(3, 120)",190,3155.737705,3156,3156,YES,2017,03,BUKIT PANJANG,204,122,Improved,1988
+"(8, 150)",19,3300.000000,3300,3300,YES,2017,07,BUKIT PANJANG,133,150,Maisonette,1988
