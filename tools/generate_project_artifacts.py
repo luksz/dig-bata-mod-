@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate validation artifacts and a submission-ready report."""
+"""Generate validation artifacts and supporting figures."""
 
 import argparse
 import csv
@@ -7,7 +7,6 @@ import os
 import re
 import subprocess
 import textwrap
-from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +18,6 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
@@ -386,189 +384,8 @@ def save_table_figure(
     plt.close(fig)
 
 
-def build_report_markdown(
-    spec: QuerySpec,
-    summary_rows: Sequence[Dict[str, str]],
-    output_rows: Sequence[Dict[str, str]],
-    raw_rows: Sequence[RawRow],
-) -> str:
-    town_counts = Counter(row["Town"] for row in output_rows)
-    month_counts = Counter(f"{row['Year']}-{row['Month']}" for row in output_rows)
-    summary_table = "\n".join(
-        f"| {row['Pair']} | {row['Candidate_Count']} | {row['Independent_Min_Rounded']} | {row['Program_Min_Rounded']} | {row['Matched']} | {row['Town']} | {row['Block']} |"
-        for row in summary_rows
-    )
-    first_row = output_rows[0]
-    last_row = output_rows[-1]
-
-    return f"""# Semester Group Project Report
-
-Name: [Fill in your name]  
-Matriculation Number: {spec.matric_number}
-
-## 1. Data Storage
-
-The input file contains {len(raw_rows):,} resale transactions from Jan 2015 to Dec 2025. The implementation stores the dataset in a column-oriented layout by loading each field into a dedicated Python list. The main stored columns are `year`, `month_num`, `month_key`, `town`, `block`, `floor_area_sqm`, `flat_model`, `lease_commence_date`, `resale_price`, and the derived column `price_per_sqm`.
-
-This design follows the assignment requirement to manage the data in a column-store manner instead of using row-oriented tools such as SQL tables or pandas data frames. Two practical details were handled during loading. First, the real CSV in the repository uses lowercase headers and month strings such as `Jan-15`, so the loader normalizes the headers and parses the month text into numeric year and month columns. Second, the output writer formats the fields exactly in the order requested by the brief: `(x, y), Year, Month, Town, Block, Floor_Area, Flat_Model, Lease_Commence_Date, Price_Per_Square_Meter`.
-
-Possible exceptions are handled during input and output. The code rejects invalid matriculation numbers that do not contain enough digits, checks that the CSV has a header row, and can optionally emit `No result` rows for `(x, y)` combinations with no valid candidate. For the matriculation number `{spec.matric_number}`, every one of the 568 `(x, y)` combinations produced a valid result row.
-
-## 2. Data Processing
-
-The matriculation number `{spec.matric_number}` produces the following query settings:
-
-- target start year: {spec.start_year}
-- target start month: {spec.start_month:02d}
-- matched towns: {", ".join(spec.towns)}
-
-The scan enumerates every `(x, y)` pair where `1 <= x <= 8` and `80 <= y <= 150`. A month key defined as `year * 12 + month` is precomputed for each row, making it easy to test whether a transaction falls inside a target `x`-month window. The program first filters rows by town and by the largest possible month window, then buckets the matching row indices by month offset. This lets larger windows reuse the rows already found for smaller windows rather than rescanning the full table from scratch.
-
-For each active window, candidate rows are sorted by descending floor area and then by price-per-square-meter order. The algorithm then walks the area thresholds from 150 down to 80. As soon as a row satisfies the current minimum area, it becomes eligible for that threshold and for every smaller threshold. This allows one pass over the sorted candidate list to determine the best row for all 71 possible `y` values in the current window.
-
-The final minimum is based on the raw value `resale_price / floor_area`. Rounding is applied only at output time. Ties are broken deterministically using price per square meter, month, town, block, flat model, lease commencement date, and original row order so the result remains stable across repeated runs.
-
-## 3. Experiment Result
-
-The program loaded {len(raw_rows):,} rows and produced {len(output_rows)} result rows. The output distribution was:
-
-- by town: {dict(town_counts)}
-- by year-month: {dict(month_counts)}
-
-The first output row is `({first_row['(x, y)']}, {first_row['Year']}-{first_row['Month']}, {first_row['Town']}, block {first_row['Block']}, {first_row['Floor_Area']} sqm, {first_row['Flat_Model']}, lease {first_row['Lease_Commence_Date']}, {first_row['Price_Per_Square_Meter']})`. The last output row is `({last_row['(x, y)']}, {last_row['Year']}-{last_row['Month']}, {last_row['Town']}, block {last_row['Block']}, {last_row['Floor_Area']} sqm, {last_row['Flat_Model']}, lease {last_row['Lease_Commence_Date']}, {last_row['Price_Per_Square_Meter']})`. This confirms that the output is sorted by increasing `x`, and then by increasing `y`.
-
-To validate correctness independently, four representative query pairs were recomputed using a separate brute-force validator that does not reuse the scanner’s window-processing logic. The validator filtered the raw CSV directly, recomputed the minimum price per square meter, and compared the resulting record with the generated output file. The comparison is summarized below.
-
-| Pair | Candidate Count | Independent Rounded | Program Rounded | Match | Town | Block |
-| --- | ---: | ---: | ---: | --- | --- | --- |
-{summary_table}
-
-All four validation checks matched exactly. In addition, an Excel workbook was generated with one sheet per validated pair. Each sheet contains the filtered candidate records, an Excel `MIN(...)` formula over the raw `Price_Per_Sqm_Raw` column, a `ROUND(...)` formula for the integer output value, and a direct comparison against the program output. These workbook sheets provide the same kind of spreadsheet-based evidence requested in the project brief.
-"""
-
-
-def draw_pdf_text_page(pdf: PdfPages, title: str, paragraphs: Sequence[str], footer: str = "") -> None:
-    fig = plt.figure(figsize=(8.27, 11.69))
-    fig.patch.set_facecolor("white")
-    fig.text(0.07, 0.965, title, fontsize=16, weight="bold", va="top")
-    y_pos = 0.92
-    for paragraph in paragraphs:
-        content = wrapped(paragraph, width=96)
-        fig.text(0.07, y_pos, content, fontsize=10.5, va="top")
-        line_count = content.count("\n") + 1
-        y_pos -= 0.028 * line_count + 0.02
-    if footer:
-        fig.text(0.07, 0.04, wrapped(footer, width=100), fontsize=9, va="bottom")
-    plt.axis("off")
-    pdf.savefig(fig, bbox_inches="tight")
-    plt.close(fig)
-
-
-def add_image(fig, path: Path, rect: Sequence[float]) -> None:
-    axis = fig.add_axes(rect)
-    axis.imshow(plt.imread(path))
-    axis.axis("off")
-
-
-def build_report_pdf(
-    spec: QuerySpec,
-    summary_rows: Sequence[Dict[str, str]],
-    output_rows: Sequence[Dict[str, str]],
-    raw_rows: Sequence[RawRow],
-    figure_dir: Path,
-    report_pdf_path: Path,
-) -> None:
-    town_counts = Counter(row["Town"] for row in output_rows)
-    month_counts = Counter(f"{row['Year']}-{row['Month']}" for row in output_rows)
-
-    with PdfPages(report_pdf_path) as pdf:
-        draw_pdf_text_page(
-            pdf,
-            "Semester Group Project Report",
-            [
-                "Name: [Fill in your name]",
-                f"Matriculation Number: {spec.matric_number}",
-                "",
-                "Data Storage",
-                f"The input dataset contains {len(raw_rows):,} resale transactions from Jan 2015 to Dec 2025. "
-                "The implementation uses a column-oriented layout by storing each field in its own Python list. "
-                "The main columns are year, month_num, month_key, town, block, floor_area_sqm, flat_model, "
-                "lease_commence_date, resale_price, and the derived price_per_sqm column.",
-                "This design satisfies the project requirement to store and process the table in a column-store manner. "
-                "The loader also normalizes the real repository CSV, which uses lowercase headers and month strings such as Jan-15, "
-                "so the processing logic stays aligned with the brief.",
-                "Possible exceptions are handled at load time and output time. The code checks for missing headers, rejects invalid matriculation numbers, "
-                "and can optionally emit No result rows. For U2221027H, all 568 (x, y) combinations produced valid records.",
-            ],
-        )
-
-        draw_pdf_text_page(
-            pdf,
-            "Data Processing",
-            [
-                f"Derived query settings for {spec.matric_number}: start year {spec.start_year}, start month {spec.start_month:02d}, towns {', '.join(spec.towns)}.",
-                "The program enumerates every (x, y) pair for 1 <= x <= 8 and 80 <= y <= 150. A month key of year * 12 + month is precomputed for each row so range tests are cheap during the scan.",
-                "To reuse intermediate results, the implementation first filters rows by the matched towns and the largest possible eight-month window, then buckets the surviving row indices by month offset. "
-                "As x grows from 1 to 8, each new window only adds the rows from one extra month.",
-                "Within a fixed x window, the candidate rows are sorted by descending floor area and then by price-per-square-meter order. "
-                "The algorithm walks the area thresholds from 150 down to 80 so each candidate row is considered once and can serve every smaller threshold that it satisfies.",
-                "Price per square meter is computed from the raw resale_price / floor_area value, and rounding is applied only when the output CSV is written. "
-                "Ties are broken deterministically by month, town, block, flat model, lease commencement date, and original row order.",
-            ],
-            footer="This approach keeps the implementation simple while still reusing work across month windows and across area thresholds.",
-        )
-
-        fig = plt.figure(figsize=(8.27, 11.69))
-        fig.patch.set_facecolor("white")
-        fig.text(0.07, 0.965, "Experiment Result", fontsize=16, weight="bold", va="top")
-        fig.text(
-            0.07,
-            0.915,
-            wrapped(
-                f"The program loaded {len(raw_rows):,} rows and produced {len(output_rows)} output rows. "
-                f"Result distribution by town: {dict(town_counts)}. Result distribution by year-month: {dict(month_counts)}."
-            ),
-            fontsize=10.5,
-            va="top",
-        )
-        fig.text(
-            0.07,
-            0.84,
-            wrapped(
-                "The two figures below show a successful execution run and a preview of the generated output CSV. "
-                "Together they demonstrate that the program runs successfully and writes the requested output fields in order."
-            ),
-            fontsize=10.5,
-            va="top",
-        )
-        add_image(fig, figure_dir / "run_output.png", [0.07, 0.49, 0.86, 0.27])
-        add_image(fig, figure_dir / "output_preview.png", [0.07, 0.09, 0.86, 0.32])
-        pdf.savefig(fig, bbox_inches="tight")
-        plt.close(fig)
-
-        fig = plt.figure(figsize=(8.27, 11.69))
-        fig.patch.set_facecolor("white")
-        fig.text(0.07, 0.965, "Validation", fontsize=16, weight="bold", va="top")
-        fig.text(
-            0.07,
-            0.915,
-            wrapped(
-                "Four representative (x, y) pairs were validated with an independent brute-force checker. "
-                "The checker filtered the raw CSV directly and recomputed the minimum price per square meter without using the scanner's month-bucketing logic. "
-                "All four comparisons matched the generated output exactly."
-            ),
-            fontsize=10.5,
-            va="top",
-        )
-        add_image(fig, figure_dir / "validation_summary.png", [0.07, 0.60, 0.86, 0.21])
-        add_image(fig, figure_dir / "validation_pair_1_80.png", [0.07, 0.31, 0.86, 0.22])
-        add_image(fig, figure_dir / "validation_pair_1_147.png", [0.07, 0.04, 0.86, 0.22])
-        pdf.savefig(fig, bbox_inches="tight")
-        plt.close(fig)
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate validation and report artifacts.")
+    parser = argparse.ArgumentParser(description="Generate validation artifacts and supporting figures.")
     parser.add_argument("matric_number", help="Matriculation number used for the project.")
     parser.add_argument("--input", default="ResalePricesSingapore.csv", help="Input resale CSV file.")
     parser.add_argument(
@@ -589,8 +406,6 @@ def main() -> None:
 
     validation_dir = repo_root / "validation"
     figure_dir = repo_root / "report_assets" / "figures"
-    report_md_path = repo_root / "Report.md"
-    report_pdf_path = repo_root / "Report.pdf"
 
     summary_rows: List[Dict[str, str]] = []
     candidate_map: Dict[Tuple[int, int], List[RawRow]] = {}
@@ -715,13 +530,8 @@ def main() -> None:
             font_size=8,
         )
 
-    report_md_path.write_text(build_report_markdown(spec, summary_rows, output_rows, raw_rows), encoding="utf-8")
-    build_report_pdf(spec, summary_rows, output_rows, raw_rows, figure_dir, report_pdf_path)
-
     print(f"Wrote validation summary to {validation_dir / f'{args.matric_number}_validation_summary.csv'}")
     print(f"Wrote validation workbook to {validation_dir / f'{args.matric_number}_validation_workbook.xlsx'}")
-    print(f"Wrote report markdown to {report_md_path}")
-    print(f"Wrote report PDF to {report_pdf_path}")
 
 
 if __name__ == "__main__":

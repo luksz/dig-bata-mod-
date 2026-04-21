@@ -2,8 +2,9 @@
 """Column-store scanner for the resale flat semester project."""
 
 import argparse
+from array import array
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -65,6 +66,49 @@ def format_floor_area(value: float) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
+@dataclass
+class DictionaryColumn:
+    dictionary: List[str]
+    codes: array
+    index_by_value: Dict[str, int]
+
+    @classmethod
+    def empty(cls) -> "DictionaryColumn":
+        return cls(dictionary=[], codes=array("I"), index_by_value={})
+
+    def append(self, value: str) -> None:
+        code = self.index_by_value.get(value)
+        if code is None:
+            code = len(self.dictionary)
+            self.index_by_value[value] = code
+            self.dictionary.append(value)
+        self.codes.append(code)
+
+    def __getitem__(self, index: int) -> str:
+        return self.dictionary[self.codes[index]]
+
+    def __len__(self) -> int:
+        return len(self.codes)
+
+    def code_at(self, index: int) -> int:
+        return self.codes[index]
+
+    def code_of(self, value: str) -> Optional[int]:
+        return self.index_by_value.get(value)
+
+
+@dataclass(frozen=True)
+class Zone:
+    start_index: int
+    end_index: int
+    row_count: int
+    min_month_key: int
+    max_month_key: int
+    min_floor_area: float
+    max_floor_area: float
+    town_mask: int
+
+
 @dataclass(frozen=True)
 class QuerySpec:
     matric_number: str
@@ -79,20 +123,21 @@ class QuerySpec:
 
 @dataclass
 class ColumnStore:
-    month_text: List[str]
-    year: List[int]
-    month_num: List[int]
-    month_key: List[int]
-    town: List[str]
-    flat_type: List[str]
-    block: List[str]
-    street_name: List[str]
-    storey_range: List[str]
-    floor_area_sqm: List[float]
-    flat_model: List[str]
-    lease_commence_date: List[str]
-    resale_price: List[float]
-    price_per_sqm: List[float]
+    month_text: DictionaryColumn
+    year: array
+    month_num: array
+    month_key: array
+    town: DictionaryColumn
+    flat_type: DictionaryColumn
+    block: DictionaryColumn
+    street_name: DictionaryColumn
+    storey_range: DictionaryColumn
+    floor_area_sqm: array
+    flat_model: DictionaryColumn
+    lease_commence_date: DictionaryColumn
+    resale_price: array
+    price_per_sqm: array
+    zones: List[Zone] = field(default_factory=list)
 
     def __len__(self) -> int:
         return len(self.year)
@@ -136,20 +181,20 @@ def load_column_store(csv_path: Path) -> ColumnStore:
 
         headers = resolve_headers(reader.fieldnames)
         store = ColumnStore(
-            month_text=[],
-            year=[],
-            month_num=[],
-            month_key=[],
-            town=[],
-            flat_type=[],
-            block=[],
-            street_name=[],
-            storey_range=[],
-            floor_area_sqm=[],
-            flat_model=[],
-            lease_commence_date=[],
-            resale_price=[],
-            price_per_sqm=[],
+            month_text=DictionaryColumn.empty(),
+            year=array("H"),
+            month_num=array("B"),
+            month_key=array("I"),
+            town=DictionaryColumn.empty(),
+            flat_type=DictionaryColumn.empty(),
+            block=DictionaryColumn.empty(),
+            street_name=DictionaryColumn.empty(),
+            storey_range=DictionaryColumn.empty(),
+            floor_area_sqm=array("d"),
+            flat_model=DictionaryColumn.empty(),
+            lease_commence_date=DictionaryColumn.empty(),
+            resale_price=array("d"),
+            price_per_sqm=array("d"),
         )
 
         for row in reader:
@@ -172,6 +217,7 @@ def load_column_store(csv_path: Path) -> ColumnStore:
             store.resale_price.append(resale_price)
             store.price_per_sqm.append(resale_price / floor_area)
 
+    store.zones = build_zones(store)
     return store
 
 
@@ -215,21 +261,77 @@ def better_row(store: ColumnStore, candidate: int, current: Optional[int]) -> in
     return current
 
 
+def build_zone(store: ColumnStore, start_index: int, end_index: int) -> Zone:
+    min_month_key = store.month_key[start_index]
+    max_month_key = store.month_key[start_index]
+    min_floor_area = store.floor_area_sqm[start_index]
+    max_floor_area = store.floor_area_sqm[start_index]
+    town_mask = 0
+
+    for index in range(start_index, end_index):
+        month_key = store.month_key[index]
+        floor_area = store.floor_area_sqm[index]
+        if month_key < min_month_key:
+            min_month_key = month_key
+        if month_key > max_month_key:
+            max_month_key = month_key
+        if floor_area < min_floor_area:
+            min_floor_area = floor_area
+        if floor_area > max_floor_area:
+            max_floor_area = floor_area
+        town_mask |= 1 << store.town.code_at(index)
+
+    return Zone(
+        start_index=start_index,
+        end_index=end_index,
+        row_count=end_index - start_index,
+        min_month_key=min_month_key,
+        max_month_key=max_month_key,
+        min_floor_area=min_floor_area,
+        max_floor_area=max_floor_area,
+        town_mask=town_mask,
+    )
+
+
+def build_zones(store: ColumnStore, zone_size: int = 4096) -> List[Zone]:
+    zones: List[Zone] = []
+    for start_index in range(0, len(store), zone_size):
+        end_index = min(start_index + zone_size, len(store))
+        zones.append(build_zone(store, start_index, end_index))
+    return zones
+
+
 def compute_window_buckets(store: ColumnStore, spec: QuerySpec) -> List[List[int]]:
     buckets: List[List[int]] = [[] for _ in range(MAX_X)]
-    matched_towns = set(spec.towns)
+    matched_town_codes = {
+        code
+        for code in (store.town.code_of(town_name) for town_name in spec.towns)
+        if code is not None
+    }
+    matched_town_mask = 0
+    for code in matched_town_codes:
+        matched_town_mask |= 1 << code
     start_key = spec.start_key
     end_key = start_key + MAX_X - 1
 
-    # Bucket qualifying row indices by month offset so larger x-windows can
-    # reuse the rows already collected for smaller windows.
-    for index in range(len(store)):
-        if store.town[index] not in matched_towns:
+    # Chunk-level zone metadata prunes large parts of the dataset before row
+    # checks. Row indices that survive are then bucketed by month offset so
+    # larger x-windows can reuse the rows already collected for smaller windows.
+    for zone in store.zones:
+        if zone.max_floor_area < MIN_Y:
             continue
-        month_key = store.month_key[index]
-        if not (start_key <= month_key <= end_key):
+        if zone.max_month_key < start_key or zone.min_month_key > end_key:
             continue
-        buckets[month_key - start_key].append(index)
+        if zone.town_mask & matched_town_mask == 0:
+            continue
+
+        for index in range(zone.start_index, zone.end_index):
+            if store.town.code_at(index) not in matched_town_codes:
+                continue
+            month_key = store.month_key[index]
+            if not (start_key <= month_key <= end_key):
+                continue
+            buckets[month_key - start_key].append(index)
 
     return buckets
 
